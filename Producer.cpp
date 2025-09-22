@@ -10,21 +10,17 @@
 #include <condition_variable>
 #include <fstream>
 #include "json.hpp"
+#include "time_stamp.h"
+#include "InitClientSocket.h"
 
+const char *IP="127.0.0.1";
 using namespace std;
 using json = nlohmann::json;
 std::mutex mtx;
 std::condition_variable cv;
 atomic<int> messageCount;
-int cnt = 10000;
+static int cnt = 100000;
 ofstream ofs;
-std::string get_iso8601_timestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto in_time_t = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d-%H:%M:%S");
-    return ss.str();
-}
 
 json create_message(const int &content) {
     json message;
@@ -72,7 +68,6 @@ public:
     int num;
 
     Producer() = default;
-
     void produce(Queue *buffer) {
         std::random_device rd;
         std::mt19937 gen(rd());
@@ -94,34 +89,9 @@ int newProducer(Queue *buffer) {
 //    cout<<"produce initialized"<<endl;
     return 0;
 }
-
 int sender(Queue *buffer) {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "Winsock初始化失败，错误代码: " << WSAGetLastError() << std::endl;
-        return 1;
-    }
-
-    SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (clientSocket == INVALID_SOCKET) {
-        std::cerr << "Socket创建失败，错误代码: " << WSAGetLastError() << std::endl;
-        WSACleanup();
-        return 1;
-    }
-
-    sockaddr_in serverAddr{};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    serverAddr.sin_port = htons(3000);
-
-    struct timeval timeout{};
-    timeout.tv_sec = 5;  // 秒
-    timeout.tv_usec = 0; // 微秒
-    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *) &timeout, sizeof(timeout));
-    if (connect(clientSocket, (sockaddr *) &serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        std::cerr << "连接失败，错误代码: " << WSAGetLastError() << std::endl;
-        closesocket(clientSocket);
-        WSACleanup();
+    SOCKET serverSocket;
+    if (InitClientSocket(serverSocket,IP,3000) != 0) {
         return 1;
     }
     while (cnt > 0 || (!buffer->Empty())) {
@@ -131,23 +101,24 @@ int sender(Queue *buffer) {
         const string s = data.dump()+"\n";
 
         //cout<<"发送"<<s.c_str()<<endl;
-        if (send(clientSocket, s.c_str(), strlen(s.c_str()), 0) == SOCKET_ERROR) {
+        if (send(serverSocket, s.c_str(), strlen(s.c_str()), 0) == SOCKET_ERROR) {
             // 错误处理逻辑
             cerr << "Error sending data: " << WSAGetLastError() << endl;
             break; // 或者采取其他适当的行动
         }
         ofs<<s;
     }
+    //看来我当时也想到了这种可能性,结果表明不是这个原因
     std::this_thread::sleep_for(std::chrono::seconds(6));
     json endData;
     endData["type"] = "end";
     const string endS = endData.dump() + "\n";
-    if (send(clientSocket, endS.c_str(), endS.size(), 0) == SOCKET_ERROR) {
+    if (send(serverSocket, endS.c_str(), endS.size(), 0) == SOCKET_ERROR) {
         cerr << "Error sending end message: " << WSAGetLastError() << endl;
     }
 
 // 使用 shutdown 关闭发送通道
-    if (shutdown(clientSocket, SD_SEND) == SOCKET_ERROR) {
+    if (shutdown(serverSocket, SD_SEND) == SOCKET_ERROR) {
         cerr << "Shutdown failed: " << WSAGetLastError() << endl;
     }
 
@@ -155,9 +126,9 @@ int sender(Queue *buffer) {
     linger ling{};
     ling.l_onoff = 1;
     ling.l_linger = 30; // 等待30秒
-    setsockopt(clientSocket, SOL_SOCKET, SO_LINGER, (char*)&ling, sizeof(ling));
+    setsockopt(serverSocket, SOL_SOCKET, SO_LINGER, (char*)&ling, sizeof(ling));
 
-    closesocket(clientSocket);
+    closesocket(serverSocket);
     WSACleanup();
     return 0;
 }
