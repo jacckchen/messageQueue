@@ -3,17 +3,23 @@ project(List)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(List List.cpp)
+add_executable(List List.cpp
+        net/TcpSocket.cpp
+        net/TcpSocket.h)
 add_executable(Consumer Consumer.cpp
         time_stamp.h
         timeStamp.cpp
         InitClientSocket.h
         InitClientSocket.cpp
-        mythreadpool.h)
+        mythreadpool.h
+        net/TcpSocket.cpp
+        net/TcpSocket.h)
 add_executable(Producer Producer.cpp
         time_stamp.h
         timeStamp.cpp
-        InitClientSocket.cpp)
+        InitClientSocket.cpp
+        net/TcpSocket.cpp
+        net/TcpSocket.h)
 add_executable(find findrepeat.cpp)
 
 target_link_libraries(List PRIVATE ws2_32)

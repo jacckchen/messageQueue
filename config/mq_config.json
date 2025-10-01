@@ -1,0 +1,11 @@
+{
+  "server": {
+    "ip": "127.0.0.1",
+    "port": 3000,
+    "thread_pool_size": 50,
+    "log": "./data.txt"
+  },
+  "producer": {
+    "msg_count": 100000
+  }
+}
