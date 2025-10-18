@@ -1,0 +1,161 @@
+#include "ConsumerManager.h"
+
+#include "net/TcpServer.h"
+
+void ConsumerManager::start()
+{
+    if (!server.bind(this->ip, this->port))
+    {
+        std::cerr << "Failed to bind to " << ip << ":" << port << std::endl;
+        return;
+    }
+
+    if (!server.listen())
+    {
+        std::cerr << "Failed to listen on " << ip << ":" << port << std::endl;
+        return;
+    }
+    isRunning = true;
+    while (isRunning)
+    {
+        SOCKET clientSocket = server.accept();
+        if (clientSocket != INVALID_SOCKET)
+        {
+            threadPool->enqueue([this, clientSocket]()
+            {
+                handleClient(clientSocket);
+            });
+        }
+    }
+}
+
+void ConsumerManager::handleClient(SOCKET clientSocket)
+{
+    char buffer[1024];
+    std::string recvBuffer;
+    recvBuffer.reserve(1024);
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    if (bytesReceived > 0)
+    {
+        buffer[bytesReceived] = '\0';
+        recvBuffer += buffer; // 将新数据追加到缓冲区
+        LOG_DEBUG("收到原始数据（长度：" + std::to_string(bytesReceived) + "）：" + std::string(buffer));
+
+        // 按回车拆分缓冲区中的完整JSON
+        size_t pos;
+        while ((pos = recvBuffer.find('\n')) != std::string::npos)
+        {
+            // 提取一条完整的JSON（从开头到换行符）
+            std::string jsonStr = recvBuffer.substr(0, pos);
+            // 移除已处理的部分（包括换行符）
+            recvBuffer.erase(0, pos + 1);
+
+            // 解析并处理JSON（忽略空字符串，避免空行干扰）
+            if (!jsonStr.empty())
+            {
+                try
+                {
+                    json message = json::parse(jsonStr);
+                    if (message["type"] == "Register")
+                    {
+                        LOG_INFO("添加客户端：" + jsonStr);
+                        subscribe(clientSocket, message["body"]["RequireTag"]);
+                        continue;
+                    }
+                    if (message["type"] == "Unregister")
+                    {
+                        LOG_INFO("删除客户端：" + jsonStr);
+                        unsubscribe(clientSocket, message["body"]["RequireTag"]);
+                        continue;
+                    }
+                    LOG_INFO("从客户端接收消息：" + jsonStr);
+                }
+                catch (const json::parse_error& e)
+                {
+                    LOG_ERROR("JSON解析失败（内容：" + jsonStr + "），错误：" + std::string(e.what()));
+                }
+            }
+        }
+    }
+    else if (bytesReceived == 0)
+    {
+        LOG_INFO("客户端断开连接，剩余未解析数据：" + recvBuffer);
+    }
+    else
+    {
+        int err = WSAGetLastError();
+        if (err != WSAETIMEDOUT)
+        {
+            LOG_ERROR("接收数据错误（错误码：" + std::to_string(err) + "），剩余未解析数据：" + recvBuffer);
+        }
+    }
+}
+
+void ConsumerManager::stop()
+{
+    isRunning = false;
+    for (const auto& socket : consumerTopics | std::views::keys)
+    {
+        closesocket(socket);
+    }
+    server.close();
+}
+
+void ConsumerManager::subscribe(const SOCKET& consumer, const std::string& topic)
+{
+    consumerTopics[consumer].insert(topic);
+    topicConsumers[topic].insert(consumer);
+}
+
+void ConsumerManager::unsubscribe(const SOCKET& consumer, const std::string& topic)
+{
+    auto consumerIt = consumerTopics.find(consumer);
+    if (consumerIt != consumerTopics.end())
+    {
+        consumerIt->second.erase(topic);
+        if (consumerIt->second.empty())
+        {
+            consumerTopics.erase(consumerIt);
+        }
+    }
+
+    auto topicIt = topicConsumers.find(topic);
+    if (topicIt != topicConsumers.end())
+    {
+        topicIt->second.erase(consumer);
+        if (topicIt->second.empty())
+        {
+            topicConsumers.erase(topicIt);
+        }
+    }
+}
+
+std::unordered_set<std::string> ConsumerManager::getTopicsByConsumer(const SOCKET& consumer) const
+{
+    auto it = consumerTopics.find(consumer);
+    if (it != consumerTopics.end())
+    {
+        return it->second;
+    }
+    return {};
+}
+
+std::unordered_set<SOCKET> ConsumerManager::getConsumersByTopic(const std::string& topic) const
+{
+    auto it = topicConsumers.find(topic);
+    if (it != topicConsumers.end())
+    {
+        return it->second;
+    }
+    return {};
+}
+
+bool ConsumerManager::isSubscribed(const SOCKET& consumer, const std::string& topic) const
+{
+    auto it = consumerTopics.find(consumer);
+    if (it != consumerTopics.end())
+    {
+        return it->second.find(topic) != it->second.end();
+    }
+    return false;
+}

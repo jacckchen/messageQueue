@@ -4,7 +4,6 @@
 
 #include <iostream>
 #include <fstream>
-#include <thread>
 #include <codecvt>
 #include "ThreadPool.h"
 
@@ -12,9 +11,9 @@
 #include <ctime>
 #include <sstream>
 #include <iomanip>
-#include <condition_variable>
-#include <list>
 #include "json.hpp"
+#include "Queue.h"
+#include "common/config.h"
 
 const char *IP = "127.0.0.1";
 using json = nlohmann::json;
@@ -29,51 +28,7 @@ std::string mode;
 ThreadPool pool(50);
 std::mutex messageIdmtx;
 
-template<class T>
-class Queue {
-public:
-    list<T> theList;
-    std::mutex mtx2;
-    std::condition_variable cv;
-
-    void enQueue_back(const T &x) {
-        {
-            unique_lock<mutex> lock(this->mtx);
-            unique_lock<mutex> lock2(this->mtx2);
-            this->theList.push_back(x);
-        }
-        this->cv.notify_all();
-    }
-
-    void Erase(list<T>::iterator it) {
-        {
-            unique_lock<mutex> lock(this->mtx);
-            this->theList.erase(it);
-        }
-    }
-
-    T deQueue_front() {
-        {
-            unique_lock<mutex> lock(this->mtx);
-            T x = theList.front();
-//            cout<<"get x"<<x;
-            this->theList.pop_front();
-            return x;
-        }
-    }
-
-    bool Empty() {
-        {
-            unique_lock<mutex> lock(this->mtx);
-            return this->theList.empty();
-        }
-    }
-
-private:
-    std::mutex mtx;
-};
-
-Queue<pair<SOCKET, string>> clientList;
+Queue<pair<SOCKET, string>> clientAndTopic;
 
 void heartbeat(SOCKET clientSocket, bool *closed) {
     char recvBuffer[1024];
@@ -94,19 +49,19 @@ void mySend(Queue<json> *buffer) {
     if(mode=="jq")
     {
         list<pair<SOCKET, string>>::iterator it;
-        if (clientList.Empty()) {
-            unique_lock<std::mutex> lock(clientList.mtx2);
-            clientList.cv.wait(lock);
+        if (clientAndTopic.Empty()) {
+            unique_lock<std::mutex> lock(clientAndTopic.mtx2);
+            clientAndTopic.cv.wait(lock);
         }
-        it = clientList.theList.begin();
+        it = clientAndTopic.theList.begin();
         while (true) {
             if (buffer->Empty()) {
                 unique_lock<std::mutex> lock(buffer->mtx2);
                 buffer->cv.wait(lock, [&buffer] { return !buffer->Empty(); });
             }
-            if (clientList.Empty()) {
-                unique_lock<std::mutex> lock(clientList.mtx2);
-                clientList.cv.wait(lock);
+            if (clientAndTopic.Empty()) {
+                unique_lock<std::mutex> lock(clientAndTopic.mtx2);
+                clientAndTopic.cv.wait(lock);
             }
             json j = buffer->deQueue_front();
             const string s = j.dump()+'\n';
@@ -124,11 +79,10 @@ void mySend(Queue<json> *buffer) {
                 goto resend;
             }
             it++;
-            if (it == clientList.theList.end())
-                it = clientList.theList.begin();
+            if (it == clientAndTopic.theList.end())
+                it = clientAndTopic.theList.begin();
         }
     }
-
 }
 
 //接收来自生产者的消息
@@ -143,7 +97,7 @@ void handleReceiveInt(Queue<json> *buffer,const string *s) {
         json j = json::parse(oneline);
         if (j["type"] == "Produce") {
             {
-                std::unique_lock lock(messageIdmtx);
+                std::lock_guard<std::mutex> lock(messageIdmtx);
                 if (messageCount != -1)
                 {
                     messageCount++;
@@ -228,16 +182,16 @@ void handle(SOCKET &clientSocket, Queue<json> *buffer) {
                                 closesocket(clientSocket);
                                 break;
                             }
-                            clientList.enQueue_back(pair{clientSocket, j["body"]["RequireTag"]});
+                            clientAndTopic.enQueue_back(pair{clientSocket, j["body"]["RequireTag"]});
                             numberOfConsumer++;
                             if (mode == "jq") {
                                 while (true) {
                                     std::this_thread::sleep_for(std::chrono::seconds(35));
                                     if (recv(clientSocket, recvbuffer, sizeof(recvbuffer), 0) <= 0) {
-                                        for (auto it = clientList.theList.begin();
-                                             it != clientList.theList.end(); it++) {
+                                        for (auto it = clientAndTopic.theList.begin();
+                                             it != clientAndTopic.theList.end(); it++) {
                                             if ((*it).first == clientSocket)
-                                                clientList.Erase(it);
+                                                clientAndTopic.Erase(it);
                                         }
                                         closesocket(clientSocket);
                                         clientClosed = true;
@@ -269,10 +223,10 @@ void handle(SOCKET &clientSocket, Queue<json> *buffer) {
                                     }
                                     if (clientClosed) {
                                         cout << "正在移除客户端·" << endl;
-                                        for (auto it2 = clientList.theList.begin();
-                                             it2 != clientList.theList.end(); it2++) {
+                                        for (auto it2 = clientAndTopic.theList.begin();
+                                             it2 != clientAndTopic.theList.end(); it2++) {
                                             if ((*it2).first == clientSocket)
-                                                clientList.Erase(it2);
+                                                clientAndTopic.Erase(it2);
                                         }
                                         closesocket(clientSocket);
                                         clientClosed = true;
@@ -341,7 +295,7 @@ int initSocket(SOCKET &serverSocket)
         WSACleanup();
         return 1;
     }
-    if (listen(serverSocket, 3) == SOCKET_ERROR) {
+    if (listen(serverSocket, 1024) == SOCKET_ERROR) {
         std::cerr << "监听失败，错误代码: " << WSAGetLastError() << std::endl;
         closesocket(serverSocket);
         WSACleanup();
@@ -374,17 +328,8 @@ int mythread(Queue<json> *buffer) {
 
 int main() {
     int choice;
-choose:
-    cout << "请选择消费模式：\n" << "1,广播消费 2,集群消费" << endl;
-    cin >> choice;
-    if (choice == 1) {
-        mode = "gb";
-    } else if (choice == 2) {
-        mode = "jq";
-    } else {
-        cout << "错误选择";
-        goto choose;
-    }
+    Config config("../config/mq_config.json");
+    mode=config.getMode();
     Queue<json> buffer;
     logtxt.open("./log.txt", std::ios::out);
     logtxt2.open("./log2.txt", std::ios::out);
@@ -453,6 +398,10 @@ choose:
         std::thread thethread(mythread, &buffer);
         thethread.join();
         ofs.close();
+    }
+    if(mode == "config")
+    {
+
     }
     WSACleanup();
     return 0;
