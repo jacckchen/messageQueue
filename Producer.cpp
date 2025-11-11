@@ -20,7 +20,7 @@ using json = nlohmann::json;
 std::mutex mtx;
 std::condition_variable cv;
 atomic<int> messageCount;
-static int cnt = 100000;
+static int cnt = 1000000;
 ofstream ofs;
 
 json create_message(const int &content) {

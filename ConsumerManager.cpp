@@ -1,7 +1,8 @@
 #include "ConsumerManager.h"
 
 #include "net/TcpServer.h"
-
+#include <chrono>
+#include <thread>
 void ConsumerManager::start()
 {
     if (!server.bind(this->ip, this->port))
@@ -16,16 +17,21 @@ void ConsumerManager::start()
         return;
     }
     isRunning = true;
+    // while (isRunning)
+    // {
+    //     SOCKET clientSocket = server.accept();
+    //
+    //     if (clientSocket != INVALID_SOCKET)
+    //     {
+    //         threadPool->enqueue([this, clientSocket]()
+    //         {
+    //             handleClient(clientSocket);
+    //         });
+    //     }
+    // }
     while (isRunning)
     {
-        SOCKET clientSocket = server.accept();
-        if (clientSocket != INVALID_SOCKET)
-        {
-            threadPool->enqueue([this, clientSocket]()
-            {
-                handleClient(clientSocket);
-            });
-        }
+        handleSelect();
     }
 }
 
@@ -68,6 +74,10 @@ void ConsumerManager::handleClient(SOCKET clientSocket)
                         unsubscribe(clientSocket, message["body"]["RequireTag"]);
                         continue;
                     }
+                    if (message["type"] == "Pull")
+                    {
+                        taskQueue->enQueue_back(message);
+                    }
                     LOG_INFO("从客户端接收消息：" + jsonStr);
                 }
                 catch (const json::parse_error& e)
@@ -87,6 +97,189 @@ void ConsumerManager::handleClient(SOCKET clientSocket)
         if (err != WSAETIMEDOUT)
         {
             LOG_ERROR("接收数据错误（错误码：" + std::to_string(err) + "），剩余未解析数据：" + recvBuffer);
+        }
+    }
+}
+void ConsumerManager::handleSelect()
+{
+    struct timeval timeout;
+    timeout.tv_sec = 1;  // 1秒超时
+    timeout.tv_usec = 0;
+
+    readSet = masterSet;
+
+    int activity = select((int)(maxSocket + 1), &readSet, NULL, NULL, &timeout);
+
+    if (activity < 0)
+    {
+        if (isRunning)
+        {
+            LOG_ERROR("select error");
+        }
+        return;
+    }
+
+    if (activity == 0)
+    {
+        // 超时检查，清理不活跃的客户端
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = clients.begin(); it != clients.end(); )
+        {
+            auto duration = std::chrono::duration_cast<std::chrono::seconds>(
+                now - it->second.lastActivity).count();
+
+            if (duration > 300) // 5分钟无活动则断开连接
+            {
+                LOG_INFO("Client timeout, closing connection");
+                closesocket(it->first);
+                FD_CLR(it->first, &masterSet);
+
+                // 从订阅表中移除客户端
+                auto topics = getTopicsByConsumer(it->first);
+                for (const auto& topic : topics)
+                {
+                    unsubscribe(it->first, topic);
+                }
+
+                it = clients.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        return;
+    }
+
+    SOCKET listenSocket = server.getSocket();
+
+    // 检查监听套接字是否有新连接
+    if (FD_ISSET(listenSocket, &readSet))
+    {
+        SOCKET clientSocket = server.accept();
+        if (clientSocket != INVALID_SOCKET)
+        {
+            FD_SET(clientSocket, &masterSet);
+            if (clientSocket > maxSocket)
+                maxSocket = clientSocket;
+
+            // 初始化客户端信息
+            clients[clientSocket] = ClientInfo{ "", std::chrono::steady_clock::now() };
+
+            LOG_INFO("New client connected: " + std::to_string(clientSocket));
+        }
+
+        activity--;
+    }
+
+    // 处理已连接的客户端
+    for (auto it = clients.begin(); it != clients.end() && activity > 0; )
+    {
+        SOCKET clientSocket = it->first;
+
+        if (FD_ISSET(clientSocket, &readSet))
+        {
+            activity--;
+            processClientData(clientSocket);
+        }
+
+        ++it;
+    }
+}
+void ConsumerManager::processClientData(SOCKET clientSocket)
+{
+    char buffer[1024];
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+
+    if (bytesReceived > 0)
+    {
+        // 更新最后活动时间
+        clients[clientSocket].lastActivity = std::chrono::steady_clock::now();
+
+        buffer[bytesReceived] = '\0';
+        clients[clientSocket].buffer += buffer;
+
+        LOG_DEBUG("Received raw data (length: " + std::to_string(bytesReceived) + "): " + std::string(buffer));
+
+        // 按回车拆分缓冲区中的完整JSON
+        size_t pos;
+        while ((pos = clients[clientSocket].buffer.find('\n')) != std::string::npos)
+        {
+            // 提取一条完整的JSON（从开头到换行符）
+            std::string jsonStr = clients[clientSocket].buffer.substr(0, pos);
+            // 移除已处理的部分（包括换行符）
+            clients[clientSocket].buffer.erase(0, pos + 1);
+
+            // 解析并处理JSON（忽略空字符串，避免空行干扰）
+            if (!jsonStr.empty())
+            {
+                try
+                {
+                    json message = json::parse(jsonStr);
+                    if (message["type"] == "Register")
+                    {
+                        LOG_INFO("Adding client: " + jsonStr);
+                        subscribe(clientSocket, message["body"]["RequireTag"]);
+                        continue;
+                    }
+                    if (message["type"] == "Unregister")
+                    {
+                        LOG_INFO("Removing client: " + jsonStr);
+                        unsubscribe(clientSocket, message["body"]["RequireTag"]);
+                        continue;
+                    }
+                    if (message["type"] == "Pull")
+                    {
+                        taskQueue->enQueue_back(message);
+                    }
+                    LOG_INFO("Message received from client: " + jsonStr);
+                }
+                catch (const json::parse_error& e)
+                {
+                    LOG_ERROR("JSON parsing failed (content: " + jsonStr + "), error: " + std::string(e.what()));
+                }
+            }
+        }
+    }
+
+    else if (bytesReceived == 0)
+    {
+        // 客户端关闭连接
+        LOG_INFO("Client disconnected, remaining unparsed data: " + clients[clientSocket].buffer);
+        removeClient(clientSocket);
+    }
+    else
+    {
+        int err = WSAGetLastError();
+        if (err != WSAETIMEDOUT)
+        {
+            LOG_ERROR("Receive data error (error code: " + std::to_string(err) + "), remaining unparsed data: " + clients[clientSocket].buffer);
+            removeClient(clientSocket);
+        }
+    }
+}
+void ConsumerManager::removeClient(SOCKET clientSocket)
+{
+    // 从订阅表中移除客户端
+    auto topics = getTopicsByConsumer(clientSocket);
+    for (const auto& topic : topics)
+    {
+        unsubscribe(clientSocket, topic);
+    }
+
+    // 关闭套接字并从集合中移除
+    closesocket(clientSocket);
+    FD_CLR(clientSocket, &masterSet);
+    clients.erase(clientSocket);
+
+    // 更新最大套接字值
+    if (clientSocket == maxSocket)
+    {
+        maxSocket = server.getSocket();
+        for (const auto& pair : clients)
+        {
+            if (pair.first > maxSocket)
+                maxSocket = pair.first;
         }
     }
 }
@@ -152,10 +345,10 @@ std::unordered_set<SOCKET> ConsumerManager::getConsumersByTopic(const std::strin
 
 bool ConsumerManager::isSubscribed(const SOCKET& consumer, const std::string& topic) const
 {
-    auto it = consumerTopics.find(consumer);
+    const auto it = consumerTopics.find(consumer);
     if (it != consumerTopics.end())
     {
-        return it->second.find(topic) != it->second.end();
+        return it->second.contains(topic);
     }
     return false;
 }

@@ -5,11 +5,16 @@
 #include <string>
 #include <winsock2.h>
 #include "json.hpp"
+#include "Queue.h"
 #include "ThreadPool.h"
 #include "net/TcpServer.h"
 
 class ConsumerManager {
     using json = nlohmann::json;
+    fd_set masterSet;
+    fd_set readSet;
+    SOCKET maxSocket;
+
     // 存储消费者ID到订阅话题列表的映射
     std::unordered_map<SOCKET, std::unordered_set<std::string>> consumerTopics;
 
@@ -18,11 +23,20 @@ class ConsumerManager {
     std::string ip;
     std::uint16_t port;
     std::shared_ptr<ThreadPool> threadPool;
+    std::shared_ptr<Queue<json>> taskQueue;
+    struct ClientInfo {
+        std::string buffer; // 接收缓冲区
+        std::chrono::steady_clock::time_point lastActivity;
+    };
+    std::unordered_map<SOCKET, ClientInfo> clients;
     bool isRunning{false};
     TcpServer server;
+    void handleSelect();
+    void processClientData(SOCKET clientSocket);
+    void removeClient(SOCKET clientSocket);
 public:
-    ConsumerManager(std::string ip,const std::uint16_t &port, const std::shared_ptr<ThreadPool> &threadPool):
-    ip(std::move(ip)),port(port),threadPool(threadPool){};
+    ConsumerManager(std::string ip,const std::uint16_t &port, const std::shared_ptr<ThreadPool> &threadPool,const std::shared_ptr<Queue<json>> &taskQueue):
+    ip(std::move(ip)),port(port),threadPool(threadPool),taskQueue(taskQueue){};
     // 添加订阅关系
     void subscribe(const SOCKET &consumer, const std::string& topic);
 

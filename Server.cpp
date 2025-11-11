@@ -16,8 +16,9 @@ Server::Server(const std::string &configFile):Server(Config(configFile)) {
 void Server::init() {
     threadPool=std::make_unique<ThreadPool>(threadPoolSize);
     messageQueue=std::make_shared<Queue<json>>();
+    taskQueue=std::make_shared<Queue<json>>();
     receiver=std::make_unique<Receiver>(ip,receivePort,messageQueue,threadPool);
-    this->consumerManager=std::make_shared<ConsumerManager>(ip,port,threadPool);
+    this->consumerManager=std::make_shared<ConsumerManager>(ip,port,threadPool,taskQueue);
     this->dispatcher=std::make_unique<ClusterDispatcher>(consumerManager,threadPool,messageQueue);
 }
 void Server::start() const

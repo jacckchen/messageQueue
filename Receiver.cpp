@@ -3,6 +3,8 @@
 
 #include <iostream>
 
+std::atomic<int> co=0;
+std::mutex mtx;
 void Receiver::receive() {
     // 绑定和监听已在构造函数中完成，此处直接开始接收连接
     if (!server.bind(this->ip, this->port)) {
@@ -50,6 +52,16 @@ void Receiver::handleClient(SOCKET clientSocket) const
                     try {
                         json message = json::parse(jsonStr);
                         messageQueue->enQueue_back(message);
+                        co++;
+                        {
+                            std::lock_guard<std::mutex> lock(mtx);
+                            if (co==10000)
+                            {
+                                co=0;
+                                LOG_INFO("一万条");
+                            }
+                        }
+
                         // LOG_INFO("解析并添加消息：" + jsonStr);
                     } catch (const json::parse_error& e) {
                         LOG_ERROR("JSON解析失败（内容：" + jsonStr + "），错误：" + std::string(e.what()));

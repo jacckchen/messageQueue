@@ -15,6 +15,7 @@ class Server {
     std::shared_ptr<ThreadPool> threadPool;
     std::shared_ptr<ConsumerManager> consumerManager;
     std::shared_ptr<Queue<json>> messageQueue;
+    std::shared_ptr<Queue<json>> taskQueue;
     std::unique_ptr<Receiver> receiver;
     std::unique_ptr<ClusterDispatcher> dispatcher;
     bool isRunning{true};
