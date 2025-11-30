@@ -29,7 +29,7 @@ class ConsumerManager {
         std::chrono::steady_clock::time_point lastActivity;
     };
     std::unordered_map<SOCKET, ClientInfo> clients;
-    bool isRunning{false};
+    std::atomic<bool> isRunning{false};
     TcpServer server;
     void handleSelect();
     void processClientData(SOCKET clientSocket);
